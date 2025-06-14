@@ -1,0 +1,522 @@
+#!/bin/zsh
+
+# Windsurf CLI
+# A command-line tool for launching Windsurf IDE with various options
+
+# Check for dependencies and install if missing
+check_dependencies() {
+    # Check for jq (JSON processor)
+    if ! command -v jq &> /dev/null; then
+        echo "Installing jq (JSON processor)..."
+        if command -v brew &> /dev/null; then
+            brew install jq
+        elif command -v apt-get &> /dev/null; then
+            sudo apt-get update && sudo apt-get install -y jq
+        elif command -v yum &> /dev/null; then
+            sudo yum install -y jq
+        else
+            echo "Error: Could not install jq. Please install it manually."
+            echo "Visit: https://stedolan.github.io/jq/download/"
+            exit 1
+        fi
+    fi
+}
+
+# Run dependency check
+check_dependencies
+
+# Script to open Windsurf IDE at the current directory or specified path
+# Author: Windsurf User
+# Date: 2025-06-14
+# Version: 2.0
+
+# Theme configuration files for workspace theme
+THEME_CONFIG_FILE=".windsurf-theme.json"  # Legacy format
+VSCODE_SETTINGS_DIR=".vscode"
+VSCODE_SETTINGS_FILE=".vscode/settings.json"
+
+# Available themes
+declare -A THEMES
+THEMES=(  
+  ["default"]="#2C2C2C" 
+  ["dark"]="#1E1E1E" 
+  ["light"]="#F5F5F5" 
+  ["blue"]="#193549" 
+  ["red"]="#4B1818" 
+  ["green"]="#0D3D0D" 
+  ["purple"]="#2D2140" 
+  ["orange"]="#4D3800" 
+  ["pink"]="#4D2142" 
+  ["gray"]="#333333" 
+)
+
+# Usage function
+show_usage() {
+    cat << EOF
+Usage: windsurf [OPTIONS] [PATH]
+
+Opens Windsurf IDE at the specified path or current directory.
+
+Options:
+  -h, --help              Show this help message and exit
+  -v, --version           Display version information
+  -d, --dry-run           Show what would happen without actually launching Windsurf
+  -t, --theme THEME       Set workspace theme (for current session only)
+  --set-theme THEME       Set workspace theme permanently
+  --set-color HEX         Set workspace custom color (hex format: #RRGGBB)
+  --list-themes           List all available themes
+  --show-theme            Show current workspace theme
+  --reset-theme           Reset to default theme
+
+Examples:
+  windsurf                         # Open Windsurf at current directory
+  windsurf ~/projects/app          # Open Windsurf at specified directory
+  windsurf -t blue                 # Open with blue theme (temporary)
+  windsurf --set-theme dark        # Set dark theme for this workspace
+  windsurf --set-color "#FF5500"   # Set custom color for this workspace
+  windsurf --list-themes           # Show available themes
+EOF
+}
+
+# Version information
+show_version() {
+    echo "windsurf v2.0"
+    echo "A utility to open Windsurf IDE at specified locations with theme support"
+}
+
+# Check if Windsurf is installed
+check_windsurf() {
+    if ! osascript -e 'tell application "System Events" to (name of processes) contains "Windsurf"' &>/dev/null; then
+        if ! osascript -e 'tell application "System Events" to exists application process "Windsurf"' &>/dev/null; then
+            echo "Error: Windsurf IDE not found."
+            echo "Please ensure Windsurf is installed and accessible via macOS 'open' command."
+            exit 1
+        fi
+    fi
+}
+
+# List available themes
+list_themes() {
+    echo "Available themes:"
+    for theme in ${(k)THEMES}; do
+        echo "  $theme (${THEMES[$theme]})"
+    done
+}
+
+# Get current theme for workspace
+get_workspace_theme() {
+    local workspace_path="$1"
+    local theme_file="$workspace_path/$THEME_CONFIG_FILE"
+    
+    if [ -f "$theme_file" ]; then
+        # Use awk to extract the theme and color values
+        local theme_name=$(awk -F\" '/theme/ {print $4}' "$theme_file")
+        local color_hex=$(awk -F\" '/color/ {print $4}' "$theme_file")
+        
+        if [ -n "$theme_name" ]; then
+            echo "Current workspace theme: $theme_name"
+            if [ -n "$color_hex" ]; then
+                echo "Custom color: $color_hex"
+            fi
+        else
+            echo "No theme set for this workspace. Using default."
+        fi
+    else
+        echo "No theme set for this workspace. Using default."
+    fi
+}
+
+# Set workspace theme
+set_workspace_theme() {
+    local workspace_path="$1"
+    local theme_name="$2"
+    local theme_file="$workspace_path/$THEME_CONFIG_FILE"
+    local color_hex="${THEMES[$theme_name]}"
+    
+    # Create legacy theme configuration
+    echo "{\n  \"theme\": \"$theme_name\",\n  \"color\": \"$color_hex\"\n}" > "$theme_file"
+    
+    # Create VS Code settings directory if it doesn't exist
+    mkdir -p "$workspace_path/$VSCODE_SETTINGS_DIR"
+    
+    # Check if settings.json exists
+    local settings_file="$workspace_path/$VSCODE_SETTINGS_FILE"
+    if [ -f "$settings_file" ]; then
+        # Use jq to update or add the theme setting
+        if [ -s "$settings_file" ] && jq empty "$settings_file" 2>/dev/null; then
+            # Valid JSON file with content
+            jq --arg theme "$theme_name" '."workbench.colorTheme" = $theme' "$settings_file" > "${settings_file}.tmp" && mv "${settings_file}.tmp" "$settings_file"
+        else
+            # Invalid or empty JSON, create new
+            echo '{"workbench.colorTheme": "'$theme_name'"}' > "$settings_file"
+        fi
+    else
+        # Create new settings file
+        echo '{"workbench.colorTheme": "'$theme_name'"}' > "$settings_file"
+    fi
+    
+    echo "Theme '$theme_name' set for workspace: $workspace_path"
+    echo "VS Code settings updated in $VSCODE_SETTINGS_FILE"
+}
+
+# Set workspace custom color
+set_workspace_color() {
+    local workspace_path="$1"
+    local color_hex="$2"
+    local theme_file="$workspace_path/$THEME_CONFIG_FILE"
+    
+    # Validate hex color format
+    if [[ ! "$color_hex" =~ ^#[0-9A-Fa-f]{6}$ ]]; then
+        echo "Error: Invalid color format. Use hex format: #RRGGBB"
+        exit 1
+    fi
+    
+    # Create a slightly darker version of the color for editor background
+    # This is a simple approach - we could use a more sophisticated color transformation
+    local editor_color="$color_hex"
+    
+    # Create legacy theme configuration
+    echo "{\n  \"theme\": \"custom\",\n  \"color\": \"$color_hex\"\n}" > "$theme_file"
+    
+    mkdir -p "$workspace_path/$VSCODE_SETTINGS_DIR"
+    
+    local settings_file="$workspace_path/$VSCODE_SETTINGS_FILE"
+    if [ -f "$settings_file" ]; then
+        # Use jq to update or add the color customization
+        if [ -s "$settings_file" ] && jq empty "$settings_file" 2>/dev/null; then
+            # Valid JSON file with content
+            jq --arg color "$color_hex" --arg editor "$editor_color" \
+               '."workbench.colorCustomizations" = {
+                  "titleBar.activeBackground": $color,
+                  "editor.background": $editor,
+                  "sideBar.background": $editor,
+                  "activityBar.background": $color
+                }' "$settings_file" > "${settings_file}.tmp" && mv "${settings_file}.tmp" "$settings_file"
+        else
+            # Invalid or empty JSON, create new
+            echo '{"workbench.colorCustomizations": {
+              "titleBar.activeBackground": "'$color_hex'",
+              "editor.background": "'$editor_color'",
+              "sideBar.background": "'$editor_color'",
+              "activityBar.background": "'$color_hex'"
+            }}' > "$settings_file"
+        fi
+    else
+        # Create new settings file
+        echo '{"workbench.colorCustomizations": {
+          "titleBar.activeBackground": "'$color_hex'",
+          "editor.background": "'$editor_color'",
+          "sideBar.background": "'$editor_color'",
+          "activityBar.background": "'$color_hex'"
+        }}' > "$settings_file"
+    fi
+    
+    echo "Custom color '$color_hex' set for workspace: $workspace_path"
+    echo "VS Code settings updated in $VSCODE_SETTINGS_FILE"
+}
+
+# Reset workspace theme to default
+reset_workspace_theme() {
+    local workspace_path="$1"
+    local theme_file="$workspace_path/$THEME_CONFIG_FILE"
+    local settings_file="$workspace_path/$VSCODE_SETTINGS_FILE"
+    
+    # Remove theme file if it exists
+    if [ -f "$theme_file" ]; then
+        rm "$theme_file"
+    fi
+    
+    # Update VS Code settings if they exist
+    if [ -f "$settings_file" ]; then
+        if [ -s "$settings_file" ] && jq empty "$settings_file" 2>/dev/null; then
+            # Valid JSON file - remove theme properties but keep other settings
+            jq 'del(."workbench.colorTheme") | del(."workbench.colorCustomizations")' "$settings_file" > "${settings_file}.tmp" && mv "${settings_file}.tmp" "$settings_file"
+        else
+            # Invalid JSON or empty file - create empty object
+            echo "{}" > "$settings_file"
+        fi
+        echo "VS Code theme settings removed from $VSCODE_SETTINGS_FILE"
+    fi
+    
+    echo "Theme reset to default for workspace: $workspace_path"
+}
+
+# Process arguments
+DRY_RUN=false
+PATH_ARG=""
+TEMP_THEME=""
+SET_THEME=""
+SET_COLOR=""
+LIST_THEMES_FLAG=false
+SHOW_THEME_FLAG=false
+RESET_THEME_FLAG=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            show_usage
+            exit 0
+            ;;
+        -v|--version)
+            show_version
+            exit 0
+            ;;
+        -d|--dry-run)
+            DRY_RUN=true
+            ;;
+        -t|--theme)
+            shift
+            if [[ $# -eq 0 || $1 == -* ]]; then
+                echo "Error: --theme requires a theme name"
+                echo "Use --list-themes to see available themes"
+                exit 1
+            fi
+            TEMP_THEME="$1"
+            ;;
+        --set-theme)
+            shift
+            if [[ $# -eq 0 || $1 == -* ]]; then
+                echo "Error: --set-theme requires a theme name"
+                echo "Use --list-themes to see available themes"
+                exit 1
+            fi
+            SET_THEME="$1"
+            ;;
+        --set-color)
+            shift
+            if [[ $# -eq 0 || $1 == -* ]]; then
+                echo "Error: --set-color requires a hex color value (#RRGGBB)"
+                exit 1
+            fi
+            SET_COLOR="$1"
+            ;;
+        --list-themes)
+            LIST_THEMES_FLAG=true
+            ;;
+        --show-theme)
+            SHOW_THEME_FLAG=true
+            ;;
+        --reset-theme)
+            RESET_THEME_FLAG=true
+            ;;
+        -*)
+            echo "Error: Unknown option: $1"
+            echo "Use 'windsurf --help' for usage information"
+            exit 1
+            ;;
+        *)
+            PATH_ARG="$1"
+            shift
+            break
+            ;;
+    esac
+    shift
+done
+
+# Handle any remaining arguments as path
+if [[ $# -gt 0 ]]; then
+    echo "Warning: Extra arguments ignored: $*"
+fi
+
+# Handle the path argument
+if [ -n "$PATH_ARG" ]; then
+    # Convert to absolute path if it's not already
+    if [[ "$PATH_ARG" = /* ]]; then
+        TARGET_PATH="$PATH_ARG"
+    else
+        TARGET_PATH="$(pwd)/$PATH_ARG"
+    fi
+    
+    # Verify the path exists
+    if [ ! -d "$TARGET_PATH" ] && [ ! -f "$TARGET_PATH" ]; then
+        echo "Error: Path does not exist: $TARGET_PATH"
+        exit 1
+    fi
+else
+    TARGET_PATH="$(pwd)"
+fi
+
+# Clean up the path for display (remove trailing slashes)
+TARGET_PATH=${TARGET_PATH%/}
+
+# Handle theme-related commands
+if [ "$LIST_THEMES_FLAG" = true ]; then
+    list_themes
+    exit 0
+fi
+
+if [ "$SHOW_THEME_FLAG" = true ]; then
+    get_workspace_theme "$TARGET_PATH"
+    exit 0
+fi
+
+if [ "$RESET_THEME_FLAG" = true ]; then
+    reset_workspace_theme "$TARGET_PATH"
+    exit 0
+fi
+
+if [ -n "$SET_THEME" ]; then
+    set_workspace_theme "$TARGET_PATH" "$SET_THEME"
+    exit 0
+fi
+
+if [ -n "$SET_COLOR" ]; then
+    set_workspace_color "$TARGET_PATH" "$SET_COLOR"
+    exit 0
+fi
+
+# Check if this is a dry run or an actual execution
+if [ "$DRY_RUN" = true ]; then
+    # Get theme information for dry run
+    THEME_FILE="$TARGET_PATH/$THEME_CONFIG_FILE"
+    THEME_ARGS=""
+    
+    if [ -n "$TEMP_THEME" ]; then
+        # Use temporary theme if specified
+        if [ "$TEMP_THEME" != "default" ] && [ -z "${THEMES[$TEMP_THEME]}" ]; then
+            echo "Error: Invalid theme '$TEMP_THEME'."
+            echo "Use --list-themes to see available themes."
+            exit 1
+        fi
+        THEME_COLOR="${THEMES[$TEMP_THEME]}"
+        THEME_ARGS="--theme \"$TEMP_THEME\" --color \"$THEME_COLOR\""
+    elif [ -f "$THEME_FILE" ]; then
+        # Read theme from config file using awk for more reliable extraction
+        THEME_NAME=$(awk -F\" '/theme/ {print $4}' "$THEME_FILE")
+        COLOR_HEX=$(awk -F\" '/color/ {print $4}' "$THEME_FILE")
+        
+        if [ -n "$THEME_NAME" ] && [ -n "$COLOR_HEX" ]; then
+            THEME_ARGS="--theme \"$THEME_NAME\" --color \"$COLOR_HEX\""
+        fi
+    fi
+    
+    echo "[DRY RUN] Would open Windsurf IDE at: $TARGET_PATH"
+    if [ -n "$THEME_ARGS" ]; then
+        echo "Command that would be executed: open -a \"Windsurf\" \"$TARGET_PATH\" --args $THEME_ARGS"
+        echo "Using theme: ${TEMP_THEME:-$THEME_NAME} (${THEME_COLOR:-$COLOR_HEX})"
+    else
+        echo "Command that would be executed: open -a \"Windsurf\" \"$TARGET_PATH\""
+        echo "Using default theme"
+    fi
+    exit 0
+fi
+
+# For actual execution, check if Windsurf is available
+check_windsurf
+
+# Prepare theme arguments if needed
+THEME_ARGS=""
+THEME_INFO=""
+SKIP_THEME_PROCESSING=false
+
+# Process temporary theme option
+if [ -n "$TEMP_THEME" ]; then
+    # Validate theme
+    if [ "$TEMP_THEME" != "default" ] && [ -z "${THEMES[$TEMP_THEME]}" ]; then
+        echo "Error: Invalid theme '$TEMP_THEME'."
+        echo "Use --list-themes to see available themes."
+        exit 1
+    fi
+    
+    # Set theme arguments for this session
+    THEME_COLOR="${THEMES[$TEMP_THEME]}"
+    THEME_ARGS="--theme \"$TEMP_THEME\" --color \"$THEME_COLOR\""
+    THEME_INFO="Using theme: $TEMP_THEME ($THEME_COLOR)"
+    
+    # Create VS Code settings directory if it doesn't exist
+    mkdir -p "$TARGET_PATH/$VSCODE_SETTINGS_DIR"
+    
+    # Update VS Code settings for temporary theme
+    settings_file="$TARGET_PATH/$VSCODE_SETTINGS_FILE"
+    if [ -f "$settings_file" ]; then
+        # If file exists, update the theme setting
+        if grep -q "workbench.colorTheme" "$settings_file"; then
+            # Replace existing theme setting
+            sed -i '' 's/"workbench.colorTheme": "[^"]*"/"workbench.colorTheme": "'$TEMP_THEME'"/' "$settings_file"
+        else
+            # Use jq to update or add the theme setting
+            if [ -s "$settings_file" ] && jq empty "$settings_file" 2>/dev/null; then
+                # Valid JSON file with content
+                jq --arg theme "$TEMP_THEME" '."workbench.colorTheme" = $theme' "$settings_file" > "${settings_file}.tmp" && mv "${settings_file}.tmp" "$settings_file"
+            else
+                # Invalid or empty JSON, create new
+                echo '{"workbench.colorTheme": "'$TEMP_THEME'"}' > "$settings_file"
+            fi
+        fi
+    else
+        # Create new settings file
+        echo "{\n    \"workbench.colorTheme\": \"$TEMP_THEME\"\n}" > "$settings_file"
+    fi
+    
+    # Skip other theme processing
+    SKIP_THEME_PROCESSING=true
+fi
+
+# Otherwise check for workspace theme config
+if [ "$SKIP_THEME_PROCESSING" = false ]; then
+    THEME_FILE="$TARGET_PATH/$THEME_CONFIG_FILE"
+    if [ -f "$THEME_FILE" ]; then
+        # Read theme from config file using awk for more reliable extraction
+        THEME_NAME=$(awk -F\" '/theme/ {print $4}' "$THEME_FILE")
+        COLOR_HEX=$(awk -F\" '/color/ {print $4}' "$THEME_FILE")
+        
+        if [ -n "$THEME_NAME" ] && [ -n "$COLOR_HEX" ]; then
+            THEME_ARGS="--theme \"$THEME_NAME\" --color \"$COLOR_HEX\""
+            THEME_INFO="Using workspace theme: $THEME_NAME ($COLOR_HEX)"
+        fi
+    fi
+fi
+
+# Launch Windsurf IDE
+if [ -n "$DRY_RUN" ]; then
+    echo "Would launch Windsurf IDE at: $TARGET_PATH"
+    exit 0
+fi
+
+# Skip actual launch if MOCK_OPEN is set (for testing)
+if [ -n "$MOCK_OPEN" ]; then
+    echo "MOCK: Would launch Windsurf IDE at: $TARGET_PATH"
+    exit 0
+fi
+
+if [ -n "$THEME_ARGS" ]; then
+    echo "Theme settings saved to workspace configuration."
+    echo "- VS Code will use these settings automatically when you open this workspace."
+    echo "- Windsurf IDE will use these settings in the future when theme support is added."
+    echo "$THEME_INFO"
+    
+    # Launch without theme args since they're not supported yet
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS
+        open -a "Windsurf" "$TARGET_PATH" $LAUNCH_ARGS
+        LAUNCH_STATUS=$?
+    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        # Linux
+        windsurf-ide "$TARGET_PATH" $LAUNCH_ARGS
+        LAUNCH_STATUS=$?
+    else
+        echo "Unsupported operating system: $OSTYPE"
+        exit 1
+    fi
+else
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS
+        open -a "Windsurf" "$TARGET_PATH" $LAUNCH_ARGS
+        LAUNCH_STATUS=$?
+    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        # Linux
+        windsurf-ide "$TARGET_PATH" $LAUNCH_ARGS
+        LAUNCH_STATUS=$?
+    else
+        echo "Unsupported operating system: $OSTYPE"
+        exit 1
+    fi
+fi
+
+if [ $LAUNCH_STATUS -eq 0 ]; then
+    echo "Opening Windsurf IDE at: $TARGET_PATH"
+else
+    echo "Error: Failed to open Windsurf IDE at: $TARGET_PATH"
+    echo "Please check if Windsurf application is installed correctly."
+    exit 1
+fi
